@@ -1,0 +1,12 @@
+.env
+client_secrets.json
+token.json
+history.json
+bot.log
+output/
+assets/audio_long/*
+assets/audio_shorts/*
+assets/video_loops/*
+!assets/**/.gitkeep
+__pycache__/
+*.pyc
