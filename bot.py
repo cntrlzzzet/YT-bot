@@ -3,6 +3,8 @@ import json
 import random
 import logging
 import subprocess
+import urllib.request
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -14,13 +16,14 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-# Загрузка переменных окружения из .env
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 PRIVACY = os.getenv("PRIVACY", "public")
 TEST_MODE = os.getenv("TEST_MODE", "False").lower() == "true"
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 OUTPUT_DIR = BASE_DIR / "output"
 ASSETS_DIR = BASE_DIR / "assets"
@@ -29,7 +32,6 @@ LOG_FILE = BASE_DIR / "bot.log"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Настройка логирования в файл и консоль
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -46,6 +48,19 @@ if not CLAUDE_API_KEY:
 client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 SCHEDULE = {0: "LONG", 1: "SHORTS", 2: "LONG", 3: "SHORTS", 4: "LONG", 5: "SHORTS", 6: "SHORTS"}
 
+def send_telegram(text: str):
+    """Отправляет уведомление в Telegram, если заданы токен и chat_id."""
+    if not TG_TOKEN or not TG_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": text}).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                logging.info("Уведомление в Telegram успешно отправлено.")
+    except Exception as e:
+        logging.warning(f"Не удалось отправить сообщение в Telegram: {e}")
 
 def pick_unique_media(folder: Path, category: str) -> Path:
     """Выбирает медиафайл, избегая недавних повторов."""
@@ -71,7 +86,6 @@ def pick_unique_media(folder: Path, category: str) -> Path:
     history[category] = used[-max(1, len(files) - 1):]
     HISTORY_FILE.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
     return chosen
-
 
 def get_meta(v_type: str) -> dict:
     """Генерирует SEO-метаданные через Claude API."""
@@ -103,7 +117,6 @@ def get_meta(v_type: str) -> dict:
     raw = res.content[0].text.strip().removeprefix("```json").removesuffix("```").strip()
     return json.loads(raw)
 
-
 def make_thumb(video_src: Path, text: str) -> Path:
     """Извлекает кадр и рендерит обложку с затемнением и заголовком."""
     raw = OUTPUT_DIR / "raw.jpg"
@@ -126,7 +139,6 @@ def make_thumb(video_src: Path, text: str) -> Path:
     draw.text(((1280 - w) / 2, (720 - h_text) / 2), text.upper(), font=font, fill=(255, 255, 255))
     img.save(out, quality=95)
     return out
-
 
 def make_video(v_type: str, sec: int, chosen_video: Path) -> Path:
     """Собирает итоговый видеоролик через FFmpeg без повторного перекодирования длинного потока."""
@@ -158,7 +170,6 @@ def make_video(v_type: str, sec: int, chosen_video: Path) -> Path:
         str(out)
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return out
-
 
 def upload_yt(video: Path, thumb: Path, meta: dict, v_type: str) -> str:
     """Авторизуется в YouTube Data API v3 и загружает видео с обложкой."""
@@ -201,10 +212,9 @@ def upload_yt(video: Path, thumb: Path, meta: dict, v_type: str) -> str:
     if v_type == "LONG":
         yt.thumbnails().set(videoId=res["id"], media_body=MediaFileUpload(str(thumb))).execute()
 
-    url = f"https://youtu.be{res['id']}"
+    url = f"https://youtu.be/{res['id']}"
     logging.info(f"Видео успешно опубликовано! Ссылка: {url}")
     return url
-
 
 def cleanup_temp():
     """Удаляет временные файлы сборки после публикации."""
@@ -212,7 +222,6 @@ def cleanup_temp():
         temp_file = OUTPUT_DIR / temp_name
         if temp_file.exists():
             temp_file.unlink()
-
 
 if __name__ == "__main__":
     try:
@@ -232,10 +241,12 @@ if __name__ == "__main__":
         video = make_video(v_type, duration, chosen_video)
 
         logging.info("4/4 Публикация на YouTube...")
-        upload_yt(video, thumb, meta, v_type)
+        video_url = upload_yt(video, thumb, meta, v_type)
 
         cleanup_temp()
         logging.info("Цикл автоматизации успешно завершён.")
+        send_telegram(f"✅ Новое видео ({v_type}) опубликовано!\n\n🎬 {meta['title']}\n🔗 {video_url}")
     except Exception as e:
         logging.exception(f"Ошибка при выполнении бота: {e}")
+        send_telegram(f"❌ Ошибка при запуске YT-Bot:\n{e}")
         raise
