@@ -104,6 +104,7 @@ def get_available_files(folder: Path, category: str, cooldown_days: int = 3) -> 
         sorted_old = sorted(all_files, key=lambda x: cat_hist.get(x, ""))
         limit = max(2, len(all_files) // 2)
         available = list(sorted_old)[:limit]
+        logging.info(f"Все файлы в {category} моложе {cooldown_days} дн., выбраны самые давние: {available}")
     return available
 
 def mark_files_used(category: str, filenames: list):
@@ -135,39 +136,41 @@ def get_ai_plan(v_type: str, avail_videos: list, avail_audios: list, latest_long
             f"Available videos: {json.dumps(avail_videos)}. "
             f"Available audios: {json.dumps(avail_audios)}. "
             f"Pick 1 audio and {vid_count} matching videos for a calming sleep/meditation session ({dur_label}). "
-            f"CTR & SEO Rules from YouTube Studio: "
+            f"CTR & SEO Rules: "
             f"1. Thumbnail text MUST be concise (2-3 uppercase words) focusing on benefit + frequency (e.g. 'DEEP SLEEP 432HZ', 'PINEAL GLAND 963HZ'). "
             f"2. The FIRST 2 sentences of 'desc' MUST contain high-volume search queries like '432 Hz sleep music', '528 Hz healing frequency', or 'deep sleep meditation'. "
-            f"3. Title MUST accurately state '{dur_label}' (never lie about duration). "
+            f"3. Title MUST accurately state '{dur_label}'. "
             f"Return ONLY raw JSON without markdown with keys: "
             f'"selected_videos" (list of {vid_count} exact filenames), '
             f'"selected_audio" (1 exact filename), '
             f'"frequency" (e.g. "432Hz"), '
             f'"hours": {h}, '
             f'"title" (under 85 chars with {dur_label}), '
-            f'"thumb" (MAX 3 uppercase words, e.g. "DEEP SLEEP 432HZ"), '
+            f'"thumb" (MAX 3 uppercase words), '
             f'"desc" (SEO description starting with search keywords), '
             f'"tags" (list of 12 search-optimized tags), '
             f'"sec": {h * 3600}'
         )
     else:
         sec = random.randint(45, 55)
-        ref_title = latest_long.get("title", "Deep Sleep Meditation") if latest_long else "Deep Sleep Meditation"
-        ref_freq = latest_long.get("frequency", "432Hz") if latest_long else "432Hz"
-        ref_h = latest_long.get("hours", 2) if latest_long else 2
+        promo_hint = ""
+        if latest_long:
+            promo_hint = (
+                f"Also subtly invite viewers to check out our full {latest_long.get('hours', 2)}-hour session "
+                f"'{latest_long.get('title', 'Deep Sleep Meditation')}' via the Related Video link."
+            )
         prompt = (
-            f"You are a YouTube Shorts strategist for a meditation channel. "
-            f"This Short is a teaser/excerpt promoting our full {ref_h}-hour video: '{ref_title}' ({ref_freq}). "
+            f"You are a YouTube Shorts strategist for a meditation and healing frequency channel. "
             f"Available videos: {json.dumps(avail_videos)}. "
             f"Available audios: {json.dumps(avail_audios)}. "
-            f"Pick 1 video and 1 audio. "
+            f"Pick 1 video and 1 audio that match each other in mood and theme. {promo_hint} "
             f"Return ONLY raw JSON without markdown with keys: "
             f'"selected_videos" (list of 1 exact filename), '
             f'"selected_audio" (1 exact filename), '
-            f'"overlay_text" (short 2-line uppercase call-to-action for screen overlay, e.g. "{ref_freq} HEALING TONE\\nFULL {ref_h}H SLEEP VERSION ↓"), '
-            f'"title" (intriguing teaser title under 85 chars with #shorts), '
+            f'"overlay_text" (short 2-line uppercase text for screen overlay, e.g. "528HZ DEEP HEALING\\nFULL SLEEP VERSION ↓"), '
+            f'"title" (intriguing title under 85 chars with #shorts), '
             f'"thumb" (MAX 2 uppercase words), '
-            f'"desc" (short teaser description inviting viewers to watch the full {ref_h}-hour version via Related Video link + #shorts), '
+            f'"desc" (short engaging description with hashtags including #shorts), '
             f'"tags" (list of 10 tags), '
             f'"sec": {sec}'
         )
@@ -244,6 +247,7 @@ def make_video(v_type: str, sec: int, video_paths: list, audio_path: Path, overl
     out = OUTPUT_DIR / "video.mp4"
     concat_list = OUTPUT_DIR / "concat.txt"
     combined_loop = OUTPUT_DIR / "loop_temp.mp4"
+
     if v_type == "LONG":
         vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=24,format=yuv420p"
         clip_files = list()
@@ -270,11 +274,9 @@ def make_video(v_type: str, sec: int, video_paths: list, audio_path: Path, overl
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-an", str(combined_loop)
         )), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    cmd = list(("ffmpeg", "-y", "-stream_loop", "-1", "-i", str(combined_loop)))
-    if v_type == "SHORTS":
-        offset = random.randint(30, 120)
-        cmd.extend(("-ss", str(offset)))
-    cmd.extend((
+    cmd = list((
+        "ffmpeg", "-y",
+        "-stream_loop", "-1", "-i", str(combined_loop),
         "-stream_loop", "-1", "-i", str(audio_path),
         "-map", "0:v:0", "-map", "1:a:0",
         "-t", str(sec),
@@ -348,29 +350,19 @@ if __name__ == "__main__":
         forced_h = int(os.getenv("FORCE_HOURS")) if os.getenv("FORCE_HOURS") else None
         latest_long = json.loads(LATEST_LONG_FILE.read_text(encoding="utf-8")) if LATEST_LONG_FILE.exists() else None
 
-        if v_type == "SHORTS" and latest_long:
-            long_audio_path = ASSETS_DIR / "audio_long" / latest_long["audio"]
-            long_vid_path = ASSETS_DIR / "video_loops" / random.choice(latest_long["videos"])
-            if long_audio_path.exists() and long_vid_path.exists():
-                avail_videos = list((long_vid_path.name,))
-                avail_audios = list((long_audio_path.name,))
-                audio_dir = ASSETS_DIR / "audio_long"
-            else:
-                avail_videos = get_available_files(ASSETS_DIR / "video_loops", "video_loops", cooldown_days=3)
-                avail_audios = get_available_files(ASSETS_DIR / "audio_shorts", "audio_shorts", cooldown_days=3)
-                audio_dir = ASSETS_DIR / "audio_shorts"
-        else:
-            avail_videos = get_available_files(ASSETS_DIR / "video_loops", "video_loops", cooldown_days=3)
-            audio_dir = ASSETS_DIR / ("audio_long" if v_type == "LONG" else "audio_shorts")
-            avail_audios = get_available_files(audio_dir, audio_dir.name, cooldown_days=3)
+        audio_folder_name = "audio_long" if v_type == "LONG" else "audio_shorts"
+        audio_dir = ASSETS_DIR / audio_folder_name
 
-        logging.info(f"1/4 ИИ формирует контент-план ({v_type})...")
+        avail_videos = get_available_files(ASSETS_DIR / "video_loops", "video_loops", cooldown_days=3)
+        avail_audios = get_available_files(audio_dir, audio_folder_name, cooldown_days=3)
+
+        logging.info(f"1/4 ИИ подбирает свежие видео и аудио ({v_type})...")
         plan = get_ai_plan(v_type, avail_videos, avail_audios, latest_long=latest_long, forced_hours=forced_h)
 
         chosen_vids = list(ASSETS_DIR / "video_loops" / v for v in plan["selected_videos"])
         chosen_audio = audio_dir / plan["selected_audio"]
 
-        logging.info(f"Выбраны видео: {plan['selected_videos']} | Аудио: {plan['selected_audio']}")
+        logging.info(f"Выбраны видео: {plan['selected_videos']} | Аудио ({audio_folder_name}): {plan['selected_audio']}")
         logging.info(f"Заголовок: {plan['title']}")
 
         logging.info("2/4 Создание обложки в сине-фиолетовых тонах...")
@@ -384,17 +376,16 @@ if __name__ == "__main__":
         logging.info("4/4 Публикация на YouTube...")
         video_url = upload_yt(video, thumb, plan, v_type)
 
+        mark_files_used("video_loops", plan["selected_videos"])
+        mark_files_used(audio_folder_name, list((plan["selected_audio"],)))
+
         if v_type == "LONG":
             LATEST_LONG_FILE.write_text(json.dumps({
                 "title": plan["title"],
                 "url": video_url,
                 "frequency": plan.get("frequency", "432Hz"),
-                "hours": plan.get("hours", 2),
-                "videos": plan["selected_videos"],
-                "audio": plan["selected_audio"]
+                "hours": plan.get("hours", 2)
             }, indent=2, ensure_ascii=False), encoding="utf-8")
-            mark_files_used("video_loops", plan["selected_videos"])
-            mark_files_used("audio_long", list((plan["selected_audio"],)))
 
         cleanup_temp()
         logging.info("Цикл автоматизации успешно завершён.")
@@ -408,10 +399,12 @@ if __name__ == "__main__":
                 f"🔗 {video_url}"
             )
         else:
-            ref_info = f"\n👉 Привяжи в YouTube Studio как «Связанное видео»: {latest_long['title']} ({latest_long['url']})" if latest_long else ""
+            ref_info = f"\n👉 Можно привязать как «Связанное видео»: {latest_long['title']} ({latest_long['url']})" if latest_long else ""
             send_telegram(
-                f"✅ Опубликован новый SHORTS-тизер!\n\n"
+                f"✅ Опубликован новый SHORTS!\n\n"
                 f"🎬 {plan['title']}\n"
+                f"🎞 Футаж: {', '.join(plan['selected_videos'])}\n"
+                f"🎵 Трек: {plan['selected_audio']}\n"
                 f"🔗 {video_url}{ref_info}"
             )
     except Exception as e:
